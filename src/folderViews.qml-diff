@@ -1,0 +1,105 @@
+;LOAD folderViews.qmd
+;
+;folderViews v1.0 — per-folder thumbnail-size + sort persistence on porsche.
+;
+;Hooks /qml/device/view/syncserviceexplorer/TreeExplorerView.qml so that
+;each My Files folder remembers its own thumbnail size, sort key, and
+;ascending/descending direction across xochitl restarts.
+;
+;State file: /home/root/.folderViews.json
+;  { "<folder-uuid>": { thumbnailSize, homeSortOrder, ascendingOrder },
+;    "__root__":      { ... } }
+;
+;Reset everything: rm /home/root/.folderViews.json (then restart xochitl).
+;
+;Architecture:
+; - We can't directly hook NOTIFY signals on Settings (they exist but the
+;   hashtab dance is fragile), so we mirror the three watched values into
+;   local watcher properties (fvWatch*). QML re-emits ...Changed on the
+;   mirror whenever the upstream binding propagates, giving us a
+;   guaranteed signal handler entry point.
+; - fvApply() applies the saved record for the current folder by writing
+;   back into Settings.* + thumbnailSettings.thumbnailSize. While
+;   applying, fvApplying=true suppresses the persist feedback loop that
+;   would otherwise re-save what we just restored.
+; - fvPersist() snapshots the current globals into the per-folder map
+;   keyed by treeExplorerView.explorer.currentFolderId (or "__root__"
+;   for the empty-string root parent).
+;
+;Compile via bin/compile-qmd.sh; install via the project Makefile.
+
+AFFECT /qml/device/view/syncserviceexplorer/TreeExplorerView.qml
+    TRAVERSE ?#treeExplorerView
+        LOCATE BEFORE ALL
+        INSERT {
+            property bool fvApplying: false
+            property string fvStateUrl: "file:///home/root/.folderViews.json"
+
+            property string fvWatchFolder: treeExplorerView.explorer ? treeExplorerView.explorer.currentFolderId : ""
+            property int fvWatchSort: Settings.homeSortOrder
+            property bool fvWatchAsc: Settings.ascendingOrder
+            property int fvWatchThumb: thumbnailSettings.thumbnailSize
+
+            onFvWatchFolderChanged: treeExplorerView.fvApply()
+            onFvWatchSortChanged: treeExplorerView.fvPersist()
+            onFvWatchAscChanged: treeExplorerView.fvPersist()
+            onFvWatchThumbChanged: treeExplorerView.fvPersist()
+
+            function fvKey() {
+                var k = treeExplorerView.fvWatchFolder;
+                return (k && k.length > 0) ? k : "__root__";
+            }
+
+            function fvReadAll() {
+                var xhr = new XMLHttpRequest();
+                try {
+                    xhr.open("GET", treeExplorerView.fvStateUrl, false);
+                    xhr.send();
+                    if (xhr.responseText && xhr.responseText.length > 0) {
+                        return JSON.parse(xhr.responseText);
+                    }
+                } catch (e) {}
+                return ({});
+            }
+
+            function fvWriteAll(map) {
+                var xhr = new XMLHttpRequest();
+                try {
+                    xhr.open("PUT", treeExplorerView.fvStateUrl);
+                    xhr.send(JSON.stringify(map));
+                } catch (e) {}
+            }
+
+            function fvApply() {
+                if (treeExplorerView.fvApplying) return;
+                var map = treeExplorerView.fvReadAll();
+                var rec = map[treeExplorerView.fvKey()];
+                if (!rec) return;
+                treeExplorerView.fvApplying = true;
+                if (rec.thumbnailSize !== undefined) {
+                    thumbnailSettings.thumbnailSize = rec.thumbnailSize;
+                }
+                if (rec.homeSortOrder !== undefined) {
+                    Settings.homeSortOrder = rec.homeSortOrder;
+                }
+                if (rec.ascendingOrder !== undefined) {
+                    Settings.ascendingOrder = rec.ascendingOrder;
+                }
+                treeExplorerView.fvApplying = false;
+            }
+
+            function fvPersist() {
+                if (treeExplorerView.fvApplying) return;
+                var map = treeExplorerView.fvReadAll();
+                map[treeExplorerView.fvKey()] = {
+                    thumbnailSize: thumbnailSettings.thumbnailSize,
+                    homeSortOrder: Settings.homeSortOrder,
+                    ascendingOrder: Settings.ascendingOrder
+                };
+                treeExplorerView.fvWriteAll(map);
+            }
+
+            Component.onCompleted: treeExplorerView.fvApply()
+        }
+    END TRAVERSE
+END AFFECT

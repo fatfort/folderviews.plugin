@@ -1,0 +1,4 @@
+.DS_Store
+*.swp
+build/
+# qmldiff binary builds locally outside this repo; see freeColour.plugin/reference/qmldiff-workflow.md
